@@ -1,2 +1,2 @@
 # pykmp
-(in progress) advanced, interactive tools for mkwii's kmp.
+a tools for editing kmp of mkwii
