@@ -1,0 +1,7 @@
+*.kmp
+*.txt
+dummyfile
+__pycache__
+old
+.pytest_cache
+.vscode
