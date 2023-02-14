@@ -1,14 +1,40 @@
 import dataclasses
+from collections import defaultdict
 from types import EllipsisType
 from typing import Iterable, Union
 
 import numpy as np
+import pandas as pd
+from typing_extensions import Literal, Self
 
 from pykmp._typing import (NXYZ, XY, XYZ, Bit, Byte, Float, Group, Int16,
-                           NScalar, Settings, UInt16, UInt32)
+                           NScalar, Settings, UInt16, UInt32, get_colname,
+                           get_dtype_and_size)
+from pykmp.ops import quadrilaterals
+from pykmp.ops.autoY import _AutoYSupport
+from pykmp.plot import _GraphvizSupport
 from pykmp.struct._base_struct import (GOBJ_SPEC, POTI_SPEC, STGI_SPEC,
                                        BaseSection, BaseStruct,
                                        section_add_attrs)
+
+_KMP_CLASSES = []
+_LEX_CLASSES = []
+
+
+def _kmp_register(cls):
+    _KMP_CLASSES.append((cls.__name__, cls))
+    return cls
+
+
+def _lex_register(cls):
+    _LEX_CLASSES.append((cls.__name__, cls))
+    return cls
+
+
+def _inplace_or_copy(cls, copy: bool, func):
+    if copy:
+        return func(cls.copy())
+    return func(cls)
 
 
 @dataclasses.dataclass(eq=False)
@@ -19,8 +45,9 @@ class KTPTStruct(BaseStruct):
     unknown: UInt16
 
 
+@_kmp_register
 @section_add_attrs(KTPTStruct)
-class KTPT(BaseSection):
+class KTPT(BaseSection, _AutoYSupport):
     pos: Float[XYZ]
     rot: Float[XYZ]
     playerIndex: Int16
@@ -36,8 +63,9 @@ class ENPTStruct(BaseStruct):
     property3: Byte
 
 
+@_kmp_register
 @section_add_attrs(ENPTStruct)
-class ENPT(BaseSection):
+class ENPT(BaseSection, _AutoYSupport):
     pos: Float[XYZ]
     widthfactor: Float
     property1: UInt16
@@ -54,8 +82,9 @@ class ENPHStruct(BaseStruct):
     dispatch: Int16
 
 
+@_kmp_register
 @section_add_attrs(ENPHStruct)
-class ENPH(BaseSection):
+class ENPH(BaseSection, _GraphvizSupport):
     start: Byte
     length: Byte
     prev: Byte[Group]
@@ -64,17 +93,18 @@ class ENPH(BaseSection):
 
 
 @dataclasses.dataclass(eq=False)
-class ITPTStruct(BaseStruct):
+class ITPTStruct(BaseStruct, _AutoYSupport):
     pos: Float[XYZ]
-    wfactor: Float
+    widthfactor: Float
     property1: UInt16
     property2: UInt16
 
 
+@_kmp_register
 @section_add_attrs(ITPTStruct)
 class ITPT(BaseSection):
     pos: Float[XYZ]
-    wfactor: Float
+    widthfactor: Float
     property1: UInt16
     property2: UInt16
 
@@ -88,8 +118,9 @@ class ITPHStruct(BaseStruct):
     unknown: Int16
 
 
+@_kmp_register
 @section_add_attrs(ITPHStruct)
-class ITPH(BaseSection):
+class ITPH(BaseSection, _GraphvizSupport):
     start: Byte
     length: Byte
     prev: Byte[Group]
@@ -107,6 +138,7 @@ class CKPTStruct(BaseStruct):
     next: Byte
 
 
+@_kmp_register
 @section_add_attrs(CKPTStruct)
 class CKPT(BaseSection):
     left: Float[XY]
@@ -115,6 +147,62 @@ class CKPT(BaseSection):
     mode: Byte
     prev: Byte
     next: Byte
+
+    def find_nonconvex_points(self: Self):
+        left_right = np.concatenate((self.left, self.right), axis=1)
+        loop = np.concatenate((left_right, left_right[:1]), axis=0)
+        nonconvex_indices = []
+        for i in range(self.entries):
+            if not quadrilaterals.is_convex_quadrilateral(
+                loop[i], loop[i + 1]
+            ):
+                nonconvex_indices.append((i, i + 1))
+        return nonconvex_indices
+
+    def fix_nonconvex(
+        self: Self,
+        indices: Union[int, list[int], None] = None,
+        moving_factor: float = 0.1,
+        max_moving_iteration: int = 20,
+        raises: Literal["warn", "raise", "ignore"] = "warn",
+        copy: bool = True
+    ) -> Self:
+        """
+        Fix nonconvex quadrilaterals in the checkpoint.
+
+        Args:
+            indices (int or list[int] or None): The indices of the points to fix.
+            moving_factor(float): The factor to move the points. Default is 0.1.
+            max_moving_iteration(int): The maximum number of iterations to move the points.
+            Default is 20.
+            raises(str): Behavior when cannot fix nonconvex quadrilaterals. Default is "warn".
+            only meaningful when indices is None.
+        """
+        if isinstance(indices, int):
+            indices = [indices]
+        def fn(cls):
+            pos = np.concatenate((cls.left, cls.right), axis=1)
+            if indices is None:
+                pos = quadrilaterals.fix_all_nonconvex(
+                    pos, moving_factor, max_moving_iteration, raises
+                )
+            else:
+                for index in indices:
+                    if isinstance(index, int):
+                        pi, ni = index, index + 1
+                    elif isinstance(index, (list, tuple)):
+                        pi, ni = index
+                    else:
+                        raise TypeError(
+                            'index must be int or list/tuple of int.')
+                    lpos, rpos = quadrilaterals.fix_nonconvex(
+                        pos[pi], pos[ni], moving_factor, max_moving_iteration
+                    )
+                    pos[pi] = lpos
+                    pos[ni] = rpos
+            cls.left, cls.right = np.split(pos, 2, axis=1)
+            return cls
+        return _inplace_or_copy(self, copy, fn)
 
 
 @dataclasses.dataclass(eq=False)
@@ -126,8 +214,9 @@ class CKPHStruct(BaseStruct):
     unknown: Int16
 
 
+@_kmp_register
 @section_add_attrs(CKPHStruct)
-class CKPH(BaseSection):
+class CKPH(BaseSection, _GraphvizSupport):
     start: Byte
     length: Byte
     prev: Byte[Group]
@@ -192,8 +281,9 @@ class GOBJStruct(BaseStruct):
         return b
 
 
+@_kmp_register
 @section_add_attrs(GOBJStruct, custom_fn=GOBJ_SPEC)
-class GOBJ(BaseSection):
+class GOBJ(BaseSection, _AutoYSupport):
     defobj_cond: Byte
     defobj_enable: Bit
     defobj_preserved: Byte
@@ -214,8 +304,8 @@ class GOBJ(BaseSection):
 class PotiPoints:
     index: Union[int, slice, Iterable[int], EllipsisType]
     pos: Float[XYZ]
-    value: UInt16
-    unknown: UInt16
+    property1: UInt16
+    property2: UInt16
 
 
 @dataclasses.dataclass(eq=False)
@@ -224,53 +314,57 @@ class POTIStruct(BaseStruct):
     smooth: Byte
     forward_backward: Byte
     pos: Float[NXYZ]
-    value: UInt16[NScalar]
-    unknown: UInt16[NScalar]
+    property1: UInt16[NScalar]
+    property2: UInt16[NScalar]
 
-    def tobytes(self) -> bytes:
+    def __len__(self: Self):
+        return self.numpoints
+
+    def tobytes(self: Self) -> bytes:
         b = self.numpoints.newbyteorder('>').tobytes()
         b += self.smooth.newbyteorder('>').tobytes()
         b += self.forward_backward.newbyteorder('>').tobytes()
 
         for i in range(self.numpoints):
             b += self.pos[i].byteswap().tobytes()
-            b += self.value[i].newbyteorder('>').tobytes()
-            b += self.unknown[i].newbyteorder('>').tobytes()
+            b += self.property1[i].newbyteorder('>').tobytes()
+            b += self.property2[i].newbyteorder('>').tobytes()
 
         return b
 
-    def __getitem__(self, index: Union[int, slice, Iterable[int]]):
+    def __getitem__(self: Self, index: int | slice | Iterable[int]):
         if (isinstance(index, Iterable)
             and not all(isinstance(i, int) for i in index)):
             raise TypeError("Index must be int, slice, or iterable of ints")
         return PotiPoints(
             index,
             self.pos[index],
-            self.value[index],
-            self.unknown[index],
+            self.property1[index],
+            self.property2[index],
         )
 
     def __setitem__(
         self,
-        index: Union[int, slice, Iterable[int], EllipsisType],
+        index: int | slice | Iterable[int] | EllipsisType,
         value: PotiPoints
     ):
         if (isinstance(index, Iterable)
             and not all(isinstance(i, int) for i in index)):
             raise TypeError("Index must be int, slice, or iterable of ints")
         self.pos[index] = value.pos
-        self.value[index] = value.value
-        self.unknown[index] = value.unknown
+        self.property1[index] = value.property1
+        self.property2[index] = value.property2
 
 
+@_kmp_register
 @section_add_attrs(POTIStruct, custom_fn=POTI_SPEC)
 class POTI(BaseSection):
     numpoints: UInt16
     smooth: Byte
     forward_backward: Byte
     pos: Float[NXYZ]
-    value: UInt16[NScalar]
-    unknown: UInt16[NScalar]
+    property1: UInt16[NScalar]
+    property2: UInt16[NScalar]
 
 
 @dataclasses.dataclass(eq=False)
@@ -289,8 +383,9 @@ class AREAStruct(BaseStruct):
     padding: UInt16
 
 
+@_kmp_register
 @section_add_attrs(AREAStruct)
-class AREA(BaseSection):
+class AREA(BaseSection, _AutoYSupport):
     shape: Byte
     type: Byte
     cameindex: Byte
@@ -325,8 +420,9 @@ class CAMEStruct(BaseStruct):
     time: Float
 
 
+@_kmp_register
 @section_add_attrs(CAMEStruct)
-class CAME(BaseSection):
+class CAME(BaseSection, _AutoYSupport):
     type: Byte
     next: Byte
     unknown: Byte
@@ -353,8 +449,9 @@ class JGPTStruct(BaseStruct):
     range: Int16
 
 
+@_kmp_register
 @section_add_attrs(JGPTStruct)
-class JGPT(BaseSection):
+class JGPT(BaseSection, _AutoYSupport):
     pos: Float[XYZ]
     rot: Float[XYZ]
     unknown: UInt16
@@ -369,6 +466,7 @@ class CNPTStruct(BaseStruct):
     effect: Int16
 
 
+@_kmp_register
 @section_add_attrs(CNPTStruct)
 class CNPT(BaseSection):
     destination: Float[XYZ]
@@ -385,8 +483,9 @@ class MSPTStruct(BaseStruct):
     unknown: Int16
 
 
+@_kmp_register
 @section_add_attrs(MSPTStruct)
-class MSPT(BaseSection):
+class MSPT(BaseSection, _AutoYSupport):
     pos: Float[XYZ]
     rot: Float[XYZ]
     entryID: UInt16
@@ -405,9 +504,8 @@ class STGIStruct(BaseStruct):
     speedfactor: Float
 
 
-@section_add_attrs(
-    STGIStruct, indexing=False, custom_fn=STGI_SPEC
-)
+@_kmp_register
+@section_add_attrs(STGIStruct, indexing=False, custom_fn=STGI_SPEC)
 class STGI(BaseSection):
     lap: Byte
     poleposition: Byte
@@ -422,9 +520,58 @@ class STGI(BaseSection):
         return super().tobytes()[:-2]
 
 
-def _section_classes():
-    defined_globals = globals()
-    return [
-        (n, cls) for n, cls in defined_globals.items() \
-            if hasattr(cls, '__struct__')
-    ]
+# @dataclasses.dataclass(eq=False)
+# class FEATStruct(BaseStruct):
+#     ...
+
+
+# @dataclasses.dataclass(eq=False)
+# class SET1truct(BaseStruct):
+#     item_pos_factor: Float[XYZ]
+#     start_item: Byte
+#     padding: Byte[XYZ]  # this XYZ is no meaning
+
+
+# @_lex_register
+# @section_add_attrs(SET1truct, indexing=False)
+# class SET1(BaseSection):
+#     item_pos_factor: Float[XYZ]
+#     start_item: Byte
+#     padding: Byte[XYZ]
+
+
+# @dataclasses.dataclass(eq=False)
+# class CANNProperty:
+#     speed: Float
+#     height: Float
+#     deceleration_factor: Float
+#     end_eceleration: Float
+
+
+# @dataclasses.dataclass(eq=False)
+# class CANNStruct(BaseStruct):
+#     numtypes: UInt16
+#     speed: Float[NScalar]
+#     height: Float[NScalar]
+#     deceleration_factor: Float[NScalar]
+#     end_eceleration: Float[NScalar]
+
+
+# @_lex_register
+# @section_add_attrs(CANNStruct)
+# class CANN(BaseSection):
+#     numtypes: UInt16
+#     speed: Float[NScalar]
+#     height: Float[NScalar]
+#     deceleration_factor: Float[NScalar]
+#     end_eceleration: Float[NScalar]
+
+
+del _kmp_register
+
+
+def _section_classes(type_: str = 'kmp') -> list[tuple[str, type]]:
+    if type_ == 'kmp':
+        return _KMP_CLASSES
+    raise NotImplementedError('Currently only kmp is supported.')
+

@@ -102,9 +102,6 @@ class _BinaryParser:
     ):
         """
         Temporarily set the file to read contiuously.
-
-        Yields:
-            None: None
         """
         if self._read_contiuously:
             raise RuntimeError('File is already set to read contiuously')

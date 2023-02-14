@@ -13,7 +13,8 @@ LR = NewType("LR", int)
 Group = NewType("Group", int)
 Settings = NewType("Settings", int)
 NScalar = NewType("NScalar", int)
-NXYZ = NewType("XYZ", int)
+NXYZ = NewType("NXYZ", int)
+NProp = NewType("Nprop", int)
 
 class _DTypeMeta(type):
     def __new__(cls, name, bases, attrs):
@@ -23,9 +24,6 @@ class _DTypeMeta(type):
 
 class _Dtype(metaclass=_DTypeMeta):
     __type__: ClassVar[npt.DTypeLike] = None
-
-    def __init__(self):
-        self._dtype = np.dtype(self.__type__)
 
     def __repr__(self):
         return self.__class__.__name__
@@ -85,11 +83,32 @@ _supportdtype = [
 _argmap = {
     Scalar: 1, XYZ: 3, RGB: 3, LR: 2, XY: 2,
     Group: 6, Settings: 8,
-    NXYZ: (None, 3), NScalar: (None, 1)  # used poti points
+    NXYZ: (None, 3), NScalar: (None, 1),  # used poti points
+    NProp: (None, 4)
 }
 
 
-def get_dtype_and_size(dtype: Any) -> tuple[np.dtype, Union[int, tuple]]:
+def get_colname(key: str, dtype: Any):
+    if isinstance(dtype, np.dtype) or dtype in _supportdtype:
+        return key
+    elif (
+        hasattr(dtype, '__origin__')
+        and dtype.__origin__ in _supportdtype
+        and hasattr(dtype.__origin__, '__type__')
+    ):
+        _elements = dtype.__args__[0]
+        _counts = _argmap[_elements]
+        if isinstance(_counts, tuple):
+            _, _counts = _counts
+        if _counts == 1 or _elements.__name__ == 'RGB':
+            return key
+        elif _elements.__name__ in ['XYZ', 'LR', 'XY', 'NXYZ']:
+            name = _elements.__name__ if _elements.__name__ != 'NXYZ' else 'XYZ'
+            return [key + '_' + k.lower() for k in name]
+        return [key + '_' + str(i + 1) for i in range(_counts)]
+
+
+def get_dtype_and_size(dtype: Any) -> tuple[np.dtype, int | tuple[None, int]]:
     """Get the dtype and elements size."""
     if isinstance(dtype, np.dtype):
         return dtype, 1
@@ -104,7 +123,7 @@ def get_dtype_and_size(dtype: Any) -> tuple[np.dtype, Union[int, tuple]]:
         _elements = dtype.__args__[0]
         if _elements in _argmap:
             _elements = _argmap[_elements]
-        elif not isinstance(_elements, int):
+        else:
             raise TypeError(f"Unsupported key: {_elements}")
         return _dtype, _elements
 

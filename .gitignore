@@ -5,3 +5,12 @@ __pycache__
 old
 .pytest_cache
 .vscode
+.ipynb_checkpoints
+*.d
+*.szs
+*.obj
+*.ipynb
+*.mtl
+*.lex
+*.xlsx
+k2x2k

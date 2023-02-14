@@ -1,42 +1,20 @@
-import contextlib
 import dataclasses
 import warnings
-from collections import UserList
 from struct import pack as fpack
 from types import EllipsisType
-from typing import (Any, Callable, Dict, Iterable, Optional, Sequence, Union,
-                    overload)
+from typing import Any, Callable, Dict, Optional, Sequence, Union
 
 import numpy as np
+import pandas as pd
 
 np.set_printoptions(precision=3, suppress=True)
 
-from typing_extensions import Literal, Self
+from typing_extensions import Self
 
 import pykmp._typing as t
 from pykmp._io._parser import _BinaryParser as Parser
-from pykmp._io._parser import _convert_dtype_to_little_endian
-
-_SpecialName = {
-    'POTI': 'total_points',
-    'CAME': ['opening_index', 'padding'],
-}
-# struct size
-# https://wiki.tockdom.com/wiki/KMP_(File_Format)
-_Struct_Length = {
-    'KTPT': 0x1c,
-    'ENPT': 0x14,
-    'ENPH': 0x10,
-    'ITPT': 0x14,
-    'ITPH': 0x10,
-    'CKPT': 0x14,
-    'CKPH': 0x10,
-    'AREA': 0x30,
-    'CAME': 0x48,
-    'JGPT': 0x1c,
-    'CNPT': 0x1c,
-    'MSPT': 0x1c,
-}
+from pykmp.struct import pandas_utils
+from pykmp.struct.descriptor import DataDescriptor, _ListMax255, _SpecialName
 
 
 def _parse_object_id(parser: Parser):
@@ -82,18 +60,18 @@ def _parse_poti_points(parser: Parser, numpoints: int):
     assert parser.is_read_contiuously
 
     pos = []
-    value = []
-    unkonwn = []
+    property1 = []
+    property2 = []
 
     for _ in range(numpoints):
         pos.append(parser.read_float32(3))
-        value.append(parser.read_uint16()[None])
-        unkonwn.append(parser.read_uint16()[None])
+        property1.append(parser.read_uint16()[None])
+        property2.append(parser.read_uint16()[None])
 
     return {
         'pos': np.array(pos, dtype=np.float32),
-        'value': np.array(value, dtype=np.uint16),
-        'unknown': np.array(unkonwn, dtype=np.uint16)
+        'property1': np.array(property1, dtype=np.uint16),
+        'property2': np.array(property2, dtype=np.uint16)
     }
 
 
@@ -128,7 +106,7 @@ class _CustomFnSpec:
     def __post_init__(self):
         self._args = {}
 
-    def set_args(self, keydict: Dict[str, Any]):
+    def set_args(self: Self, keydict: Dict[str, Any]):
         """
         Set additional arguments for the function.
         If `additional_args` is empty, this method does nothing.
@@ -141,7 +119,7 @@ class _CustomFnSpec:
             return
         self._args = {k: keydict.get(k) for k in self.additional_args}
 
-    def __call__(self, parser: Parser) -> Dict[str, Any]:
+    def __call__(self: Self, parser: Parser) -> Dict[str, Any]:
         if self._args:
             ret = self.fn(parser, **self._args)
             self._args.clear()
@@ -167,7 +145,7 @@ GOBJ_SPEC = {
 
 POTI_SPEC = {
     'pos': _CustomFnSpec(
-        _parse_poti_points, ('pos', 'value', 'unknown'),
+        _parse_poti_points, ('pos', 'property1', 'property2'),
         additional_args=('numpoints',)
     )
 }
@@ -202,6 +180,7 @@ def section_add_attrs(
             raise TypeError('struct should be a dataclass.')
         cls.__struct__ = struct
         cls.__indexing__ = indexing
+        cls.__rname__ = cls.__name__
 
         if not (custom_fn is None or isinstance(custom_fn, dict)):
             raise TypeError(
@@ -229,117 +208,6 @@ def section_add_attrs(
     return wrapper
 
 
-class _ListMax255(UserList):
-    def __init__(
-        self: Self, data: Optional[Iterable[Any]] = None
-    ):
-        super().__init__(data)
-        if len(self.data) > 255:
-            raise OverflowError('List length must be less than 256.')
-
-    @contextlib.contextmanager
-    def _check_limit(self: Self, _rstr: str, obj_: Any):
-        if (
-            (len(self.data) > 255)
-            or (
-                isinstance(obj_, int) and (
-                    (_rstr == 'multiply' and len(self.data) * obj_ > 255)
-                    or (_rstr == 'insert' and len(self.data) + obj_ > 255)
-                    )
-            )
-            or (hasattr(obj_, '__len__') and len(self.data) + len(obj_) >= 255)
-        ):
-            raise OverflowError(f'Cannot {_rstr} to a list with length 255.')
-        yield
-        if len(self.data) == 255:
-            warnings.warn(
-                'The number of elements has been reached the maximum 255. '
-                f'You cannot {_rstr} more elements to this list.'
-            )
-
-    def _check_type_match(self: Self, item: Any):
-        if len(self) == 0:
-            return
-        obj = [item] if not isinstance(item, Iterable) else item
-        for obj_ in obj:
-            if not isinstance(obj_, type(self[0])):
-                raise TypeError(
-                    f'Cannot append {type(obj_)} to a list of {type(self[0])}.'
-                )
-
-    def copy(self):
-        return self.__class__(list(map(lambda x: x.copy(), self.data)))
-
-    def append(self: Self, item: Any) -> None:
-        self._check_type_match(item)
-        with self._check_limit('append', item):
-            super().append(item)
-
-    def __eq__(self: Self, other: Self):
-        return all(o == s for o, s in zip(other, self))
-
-    def __add__(self: Self, other: Iterable[Any]) -> Self:
-        self._check_type_match(other)
-        with self._check_limit('add', other):
-            return super().__add__(other)
-
-    def __radd__(self: Self, other: Iterable[Any]) -> Self:
-        self._check_type_match(other)
-        with self._check_limit('add', other):
-            return super().__radd__(other)
-
-    def __iadd__(self: Self, other: Iterable[Any]) -> Self:
-        self._check_type_match(other)
-        with self._check_limit('add', other):
-            return super().__iadd__(other)
-
-    def __mul__(self: Self, n: int) -> Self:
-        with self._check_limit('multiply', n):
-            return super().__imul__(n)
-
-    def __imul__(self: Self, n: int) -> Self:
-        with self._check_limit('multiply', n):
-            return super().__imul__(n)
-
-    def insert(self, i: int, item: Any) -> None:
-        self._check_type_match(item)
-        with self._check_limit('insert', item):
-            return super().insert(i, item)
-
-    def extend(self: Self, other: Iterable[Any]) -> None:
-        self._check_type_match(other)
-        with self._check_limit('extend', other):
-            super().extend(other)
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class _DataDescriptor:
-    section: str
-    entries: t.UInt16
-    additional: t.UInt16
-    padding: Optional[t.UInt16]
-    special_name: Optional[Union[str, list[str]]]
-    descriptor: _ListMax255
-
-    def __eq__(self: Self, other: Self):
-        if not isinstance(other, _DataDescriptor):
-            return False
-        return all(
-            getattr(self, k) == getattr(other, k)
-            for k in dataclasses.asdict(self).keys()
-        )
-
-    def __post_init__(self):
-        if not isinstance(self.descriptor, _ListMax255):
-            raise TypeError(
-                'descriptor should be a _ListMax255 instance.'
-            )
-        if self.entries != len(self.descriptor):
-            raise ValueError(
-                'entries should be the same as the length of descriptor.'
-            )
-
-
 class HexPrinter:
     def __init__(self, cls: Union["BaseSection", "BaseStruct"]):
         self._cls = cls.copy()
@@ -360,6 +228,10 @@ class HexPrinter:
             return x
 
 
+class _NamePrinter:
+    ...
+
+
 class BaseStruct:
     """Base class for all KMP structs"""
     def __eq__(self: Self, other: Self) -> bool:
@@ -371,7 +243,7 @@ class BaseStruct:
         _data = {k: v.copy() for k, v in dataclasses.asdict(self).items()}
         return self.__class__(**_data)
 
-    def __setattr__(self, __name: str, __value: Any) -> None:
+    def __setattr__(self: Self, __name: str, __value: Any) -> None:
         if hasattr(self, __name):
             _tvalue = getattr(self, __name)
             __value = np.array(__value, dtype=_tvalue.dtype)
@@ -381,14 +253,32 @@ class BaseStruct:
                 )
         super().__setattr__(__name, __value)
 
-    def tobytes(self) -> bytes:
+    def tolist(self: Self) -> Dict[str, Any]:
+        ret = []
+        for v in dataclasses.asdict(self).values():
+            if v.shape == ():  # scalar
+                ret.append(v.item())
+            elif len(v.shape) == 1:  # 1D array
+                ret.extend(v.tolist())
+            else: # 2D array (poti)
+                ret.append(v)
+        return ret
+
+    def tobytes(self: Self) -> bytes:
         _bytes = []
         for v in dataclasses.asdict(self).values():
-            _bytes.append(v.newbyteorder('>').tobytes())
+            if v.dtype.kind in 'ui':
+                v = v.newbyteorder('big')
+            else:
+                if v.shape == ():
+                    v = np.array(float(v), dtype='>f4')
+                else:
+                    v = v.astype('>f4')
+            _bytes.append(v.tobytes())
         return b''.join(_bytes)
 
     @property
-    def hex(self):
+    def hex(self: Self):
         """Use this method to print values as hex"""
         return HexPrinter(self)
 
@@ -437,7 +327,7 @@ def _efficient_read(
 
 
 class BaseSection:
-    """Base class for all KMP sections"""
+    """Base class for all KMP/LEX sections"""
     def __init_subclass__(cls, *args, **kwargs) -> None:
         annotations = cls.__annotations__
         if not annotations:
@@ -459,14 +349,14 @@ class BaseSection:
 
     def __init__(
         self: Self,
-        obj: Union[Parser, _DataDescriptor],
+        obj: Union[Parser, DataDescriptor, pd.DataFrame],
         offset: Optional[int] = None
     ) -> None:
         """
         Create a new instance of the structure
 
         Args:
-            obj (_BinaryParser or _DataDescriptor): Either a parser or a _DataDescriptor instance.
+            obj (_BinaryParser, DataDescriptor, pd.DataFrame): Input object
             offset (int, optional): Offset of the section in the file. Defaults to None.
         """
         if self.__class__.__name__ == "BaseSection":
@@ -474,13 +364,18 @@ class BaseSection:
 
         if isinstance(obj, Parser):
             if offset is None:
-                raise TypeError("Offset should be provided")
+                raise TypeError("Offset should be provided when using parser")
             with obj.read_contiuously(offset, back=True):
                 self._init_from_parser(obj)
-        elif isinstance(obj, _DataDescriptor):
+        elif isinstance(obj, DataDescriptor):
             self._init_from_descriptor(obj)
+        elif isinstance(obj, pd.DataFrame):
+            self._init_from_dataframe(obj)
         else:
-            raise TypeError("Either parser or metadata should be provided")
+            raise TypeError(
+                "Input should be either a Parser or a DataDescriptor instance. "
+                f"Got {type(obj)}"
+            )
 
     def __getitem__(
         self: Self,
@@ -495,7 +390,7 @@ class BaseSection:
             return self.copy()
         raise TypeError(f"Unsupported type {type(itemkey)}")
 
-    def __getattr__(self, __name):
+    def __getattr__(self: Self, __name: str):
         if __name in self._metadata:
             return self._pgetter(__name)
         try:
@@ -505,7 +400,7 @@ class BaseSection:
                 f"'{self.__class__.__name__}' object has no attribute '{__name}'"
             ) from None
 
-    def __setattr__(self, __name: str, __value: Any) -> None:
+    def __setattr__(self: Self, __name: str, __value: Any) -> None:
         if __name in self._metadata:
             return self._psetter(__name, __value)
         super().__setattr__(__name, __value)
@@ -516,20 +411,17 @@ class BaseSection:
     def __copy__(self: Self) -> Self:
         return self.__class__(self._to_descriptor(None, copy=True))
 
-    def __eq__(self, other: Self):
+    def __eq__(self: Self, other: Self):
         if not isinstance(other, self.__class__):
             return False
         return self._to_descriptor(None) == other._to_descriptor(None)
 
-    @overload
-    def add(self: Self, obj: Union[Self, BaseStruct]) -> Self: ...
-    @overload
+    def _repr_html_(self: Self) -> str:
+        return self.to_dataframe()._repr_html_()
+
     def add(
-        self: Self, obj: Union[Self, BaseStruct], inplace: Literal[True] = ...
-    ) -> None: ...
-    def add(
-        self: Self, obj: Union[Self, BaseStruct], inplace: bool = False
-    ) -> Union[Self, None]:
+        self: Self, obj: Union[Self, BaseStruct], copy: bool = True
+    ) -> Self:
         """Add a new struct/section to the section"""
         assert self.__indexing__, f"Cannot add to {self.section}"
         if dataclasses.is_dataclass(obj):
@@ -546,23 +438,24 @@ class BaseSection:
                 f"{self.section}."
             )
         self._sync_entries()
-        if not inplace:
+        if copy:
             return self.copy()
+        return self
 
     def copy(self: Self) -> Self:
         """Copy the section."""
         return self.__copy__()
 
     @property
-    def metadata(self) -> Dict[str, Any]:
+    def metadata(self: Self) -> dict[str, int | tuple[None, int]]:
         """Return the metadata of the section"""
         return self._metadata
 
     @property
-    def hex(self):
+    def hex(self: Self) -> HexPrinter:
         return HexPrinter(self)
 
-    def _pgetter(self, name: str) -> np.ndarray:
+    def _pgetter(self: Self, name: str) -> np.ndarray:
         if not self.__indexing__:
             return getattr(self._rdata[0], name)
         # gather values from self._rdata
@@ -574,7 +467,7 @@ class BaseSection:
             arry = np.array(arrdata, dtype=self._metadata[name][0])
         return arry
 
-    def _psetter(self, name: str, value: np.ndarray):
+    def _psetter(self: Self, name: str, value: np.ndarray):
         if not self.__indexing__ and value.ndim == 0:
             value = value[None]
         elem = self._metadata[name][1]
@@ -582,9 +475,14 @@ class BaseSection:
             elem = (elem,)
         expected_shape = (int(self.entries), *elem)
         if len(expected_shape) != value.ndim:
-            raise ValueError(
-                f"Shape mismatch. Expected {expected_shape}, got {value.shape}"
-            )
+            if not (
+                len(expected_shape) > 1
+                and expected_shape[-1] == 1
+                and value.ndim == len(expected_shape) - 1
+            ):
+                raise ValueError(
+                    f"Shape mismatch. Expected {expected_shape}, got {value.shape}"
+                )
         for i, rd in enumerate(self._rdata):
             setattr(rd, name, value[i])
 
@@ -592,16 +490,7 @@ class BaseSection:
         self: Self,
         itemkey : Union[slice, Sequence[int], None],
         copy: bool = False
-    ) -> _DataDescriptor:
-        """
-        Create metadata for `_init_from_descriptor`.
-
-        Args:
-            itemkey (int, slice, sequence): Key to get the item.
-
-        Returns:
-            dict: Metadata for `_init_from_metadata`.
-        """
+    ) -> DataDescriptor:
         kwg = dict()
         kwg['section'] = self.section
 
@@ -613,15 +502,15 @@ class BaseSection:
             kwg['entries'] = np.uint16(len(itemkeys))
 
         special_name = _SpecialName.get(self.section, 'ignored')
-        if type(special_name) is list:
-            opening_index = getattr(self, special_name[0])
-            if opening_index not in itemkeys:
+        if self.section == 'CAME':
+            op_camera = getattr(self, special_name[0])
+            if op_camera not in itemkeys:
                 warnings.warn(
                     'The CAME opening index is not in the itemkey. '
                     'This may cause freezing in the game.'
                 )
             padding = getattr(self, special_name[1])
-            kwg['additional'] = opening_index
+            kwg['additional'] = op_camera
             kwg['padding'] = padding
             kwg['special_name'] = special_name
         elif special_name == 'total_points':
@@ -640,9 +529,9 @@ class BaseSection:
                 rd = rd.copy()
             kwg['descriptor'].append(rd)
 
-        return _DataDescriptor(**kwg)
+        return DataDescriptor(**kwg)
 
-    def tobytes(self):
+    def tobytes(self: Self):
         """Convert section to bytes. Used for writing to file."""
         desciptor = self._to_descriptor(None)
         b = b''
@@ -655,7 +544,22 @@ class BaseSection:
         b += b''.join(rd.tobytes() for rd in desciptor.descriptor)
         return b
 
-    def _init_from_descriptor(self: Self, descriptor: _DataDescriptor):
+    def to_dataframe(self: Self):
+        """
+        Convert section data to a pandas DataFrame.
+
+        Returns:
+            pandas.DataFrame: The DataFrame containing the data.
+        """
+        return pandas_utils.to_dataframe(self.section, self)
+
+    def _init_from_dataframe(self, df: pd.DataFrame):
+        pandas_utils.from_dataframe(df, self)
+
+    def _init_from_descriptor(self: Self, descriptor: DataDescriptor):
+        assert self.__rname__ == descriptor.section, (
+            "Cannot init from descriptor of different section."
+        )
         setattr(self, "section", descriptor.section)
         setattr(self, "entries", descriptor.entries)
 
@@ -726,7 +630,7 @@ class BaseSection:
 
         self._rdata = _rdata
 
-    def _to_str(self, brackets: str = '()'):
+    def _to_str(self: Self, brackets: str = '()'):
         lb, rb = brackets
         _str = self.section + lb + 'entries=' + str(self.entries)
         pad_name = _SpecialName.get(self.section, 'ignored') # type: ignore
@@ -757,7 +661,6 @@ class BaseSection:
 
     def _sync_entries(self: Self):
         """Sync `entries` with the length of the data."""
-        self.entries = np.uint16(len(self._rdata))
         if hasattr(self, 'total_points'):
             total_points = np.uint16(sum(x.numpoints for x in self._rdata))
             if total_points > 255:
@@ -766,6 +669,7 @@ class BaseSection:
                     f"({total_points} > 255)."
                 )
             self.total_points = total_points
+        self.entries = np.uint16(len(self._rdata))
 
     def __str__(self: Self) -> str:
         if self.__indexing__:
