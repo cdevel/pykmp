@@ -97,6 +97,16 @@ class _ListMax255(UserList):
             super().extend(other)
 
 
+_EQ_IGNORED = (
+    'padding',
+    'unknown',
+    'unknown2',
+    'unknown3',
+    'unused',
+    'unused2',
+)
+
+
 @dataclasses.dataclass(frozen=True, eq=False)
 class DataDescriptor:
     section: str
@@ -111,7 +121,7 @@ class DataDescriptor:
             return False
         return all(
             getattr(self, k) == getattr(other, k)
-            for k in dataclasses.asdict(self).keys()
+            for k in dataclasses.asdict(self).keys() if k not in _EQ_IGNORED
         )
 
     def __post_init__(self: Self):

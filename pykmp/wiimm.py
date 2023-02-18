@@ -2,7 +2,7 @@ import os
 import subprocess
 import tempfile
 
-from pykmp.struct._kmp import KMP
+from pykmp.struct.kmp import KMP
 
 _WSZST_BIN_PATH = None
 

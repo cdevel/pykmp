@@ -14,3 +14,4 @@ old
 *.lex
 *.xlsx
 k2x2k
+_debug.py

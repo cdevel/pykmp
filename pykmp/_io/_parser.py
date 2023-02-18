@@ -217,7 +217,7 @@ class _BinaryParser:
 
         # fillbyte check
         if fillbyte is not None and size is None:
-            raise ValueError('Fillbyte is specified but size is not')
+            raise ValueError('fillbyte is specified but size is not')
 
         start = start or self.current_offset()
         with self.seek_scope(start, back):

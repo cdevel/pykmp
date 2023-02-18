@@ -2,7 +2,7 @@ import dataclasses
 import warnings
 from struct import pack as fpack
 from types import EllipsisType
-from typing import Any, Callable, Dict, Optional, Sequence, Union
+from typing import Any, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -15,197 +15,6 @@ import pykmp._typing as t
 from pykmp._io._parser import _BinaryParser as Parser
 from pykmp.struct import pandas_utils
 from pykmp.struct.descriptor import DataDescriptor, _ListMax255, _SpecialName
-
-
-def _parse_object_id(parser: Parser):
-    """Parse object_id from GOBJ for extended presence flag."""
-    assert parser.is_read_contiuously
-
-    object_id = parser.read_uint16()
-    defobj_cond = np.uint8(object_id >> 13)
-    defobj_enable = np.bool_(object_id >> 12)
-    defobj_preserved = np.uint8(object_id >> 10)
-    object_id = np.uint16(object_id & 0x03ff)
-    return {
-        'defobj_cond': defobj_cond,
-        'defobj_enable': defobj_enable,
-        'defobj_preserved': defobj_preserved,
-        'objectID': object_id
-    }
-
-
-def _parse_presence_flag(parser: Parser):
-    """Parse presence_flag from GOBJ for extended presence flag."""
-    assert parser.is_read_contiuously
-
-    pf = parser.read_uint16()
-    # mask 0xf000
-    mode = np.uint8(pf >> 12)
-    # mask 0x0fc0
-    parameters = np.uint8(pf >> 6)
-    # mask 0x0038
-    dummy = np.uint8(pf >> 3)
-    presence_flag = np.uint8(pf & 0x0007)
-
-    return {
-        'mode': mode,
-        'parameters': parameters,
-        'dummy': dummy,
-        'presence_flag': presence_flag
-    }
-
-
-def _parse_poti_points(parser: Parser, numpoints: int):
-    """Parse POTI Route points from POTI."""
-    assert parser.is_read_contiuously
-
-    pos = []
-    property1 = []
-    property2 = []
-
-    for _ in range(numpoints):
-        pos.append(parser.read_float32(3))
-        property1.append(parser.read_uint16()[None])
-        property2.append(parser.read_uint16()[None])
-
-    return {
-        'pos': np.array(pos, dtype=np.float32),
-        'property1': np.array(property1, dtype=np.uint16),
-        'property2': np.array(property2, dtype=np.uint16)
-    }
-
-
-def _parse_stgi_speedfactor(parser: Parser):
-    """Parse STGI Speed factor from STGI for max speed modifier"""
-    assert parser.is_read_contiuously
-
-    padding = parser.read_uint8()
-    speedfactor = parser.read_number('>f4', 1, size=2, fillbyte=b'\x00\x00')
-
-    return {
-        'padding': padding,
-        'speedfactor': speedfactor
-    }
-
-
-@dataclasses.dataclass
-class _CustomFnSpec:
-    """
-    Special function specification for custom parsing.
-    Private use only. You don't need to use this class.
-
-    Args:
-        fn (callable): A function to parse. first argument must be a parser.
-        ret_keys (list): A list of keys to return.
-        additional_args (list): A list of additional argument "name" for `fn`.
-    """
-    fn: Callable[[Parser, Any], Dict[str, Any]]
-    ret_keys: Sequence[str]
-    additional_args: Sequence[str] = dataclasses.field(default_factory=tuple)
-
-    def __post_init__(self):
-        self._args = {}
-
-    def set_args(self: Self, keydict: Dict[str, Any]):
-        """
-        Set additional arguments for the function.
-        If `additional_args` is empty, this method does nothing.
-
-        Args:
-            keydict (dict): A dict of key and value.
-            args should be in the dict.
-        """
-        if not self.additional_args or not keydict:
-            return
-        self._args = {k: keydict.get(k) for k in self.additional_args}
-
-    def __call__(self: Self, parser: Parser) -> Dict[str, Any]:
-        if self._args:
-            ret = self.fn(parser, **self._args)
-            self._args.clear()
-        else:
-            ret = self.fn(parser)
-        return ret
-
-
-GOBJ_SPEC = {
-        'objectID': _CustomFnSpec(
-            _parse_object_id, (
-                'defobj_cond', 'defobj_enable',
-                'defobj_preserved', 'objectID'
-            )
-        ),
-        'presence_flag': _CustomFnSpec(
-            _parse_presence_flag, (
-                'mode', 'parameters', 'dummy', 'presence_flag'
-            )
-        )
-    }
-
-
-POTI_SPEC = {
-    'pos': _CustomFnSpec(
-        _parse_poti_points, ('pos', 'property1', 'property2'),
-        additional_args=('numpoints',)
-    )
-}
-
-
-STGI_SPEC = {
-    'speedfactor': _CustomFnSpec(
-        _parse_stgi_speedfactor, ('padding', 'speedfactor')
-    )
-}
-
-
-def section_add_attrs(
-    struct: t.DataClass,
-    indexing: bool = True,
-    custom_fn: Optional[Dict[str, _CustomFnSpec]] = None,
-):
-    """
-    Add attributes to a `BaseSection` class.
-    Private use only. You don't need to use this decorator.
-
-    Args:
-        struct (Class): A class that has `__annotations__` attribute.
-        offset (int): Section offset of kmp. See https://wiki.tockdom.com/wiki/KMP_(File_Format)#Mario_Kart_Wii_specific_file_header
-        indexing (bool): Whether the struct can use indexing.
-        Only STR0 or WIM0 is assumed.
-        custom_fn (dict, optional): A dict of _CustomFnSpec.
-        Only GOBJ, POTI or STGI is assumed.
-    """
-    def wrapper(cls):
-        if not dataclasses.is_dataclass(struct):
-            raise TypeError('struct should be a dataclass.')
-        cls.__struct__ = struct
-        cls.__indexing__ = indexing
-        cls.__rname__ = cls.__name__
-
-        if not (custom_fn is None or isinstance(custom_fn, dict)):
-            raise TypeError(
-                "custom_fn should be a dict of _CustomFnSpec. or None.")
-        elif (custom_fn is not None
-            and not all(
-                    isinstance(k, _CustomFnSpec) for k in custom_fn.values()
-                )
-            ):
-                raise TypeError(
-                    "custom_fn should be a dict of _CustomFnSpec."
-                )
-        if custom_fn:
-            # check duplicate ret_keys
-            ret_keys = set()
-            for spec in custom_fn.values():
-                for key in spec.ret_keys:
-                    if key in ret_keys:
-                        raise ValueError(
-                            f"Duplicate ret_key {key} in custom_fn."
-                        )
-                    ret_keys.add(key)
-        cls.__custom_fn__ = custom_fn or {}
-        return cls
-    return wrapper
 
 
 class HexPrinter:
@@ -228,8 +37,8 @@ class HexPrinter:
             return x
 
 
-class _NamePrinter:
-    ...
+# class _NamePrinter:
+#     ...
 
 
 class BaseStruct:
@@ -253,13 +62,19 @@ class BaseStruct:
                 )
         super().__setattr__(__name, __value)
 
-    def tolist(self: Self) -> Dict[str, Any]:
+    def tolist(self: Self, as_hex: bool = False) -> dict[str, Any]:
         ret = []
         for v in dataclasses.asdict(self).values():
             if v.shape == ():  # scalar
-                ret.append(v.item())
+                item = v.item()
+                if as_hex and v.dtype.kind == 'u':
+                    item = hex(item)
+                ret.append(item)
             elif len(v.shape) == 1:  # 1D array
-                ret.extend(v.tolist())
+                if as_hex and v.dtype.kind == 'u':
+                    ret.extend(np.vectorize(hex)(v).tolist())
+                else:
+                    ret.extend(v.tolist())
             else: # 2D array (poti)
                 ret.append(v)
         return ret
@@ -277,6 +92,9 @@ class BaseStruct:
             _bytes.append(v.tobytes())
         return b''.join(_bytes)
 
+    def check(self, raises: bool = True, fix_if_possible: bool = False):
+        pass
+
     @property
     def hex(self: Self):
         """Use this method to print values as hex"""
@@ -290,8 +108,8 @@ class BaseStruct:
 def _efficient_read(
     parser: Parser,
     length: int,
-    annotations: Dict[str, Any]
-) -> Dict[str, np.ndarray]:
+    annotations: dict[str, Any]
+) -> dict[str, np.ndarray]:
     """Read data usin np.frombuffer and np.recarray"""
     assert parser.is_read_contiuously
 
@@ -349,8 +167,8 @@ class BaseSection:
 
     def __init__(
         self: Self,
-        obj: Union[Parser, DataDescriptor, pd.DataFrame],
-        offset: Optional[int] = None
+        obj: Parser | DataDescriptor | pd.DataFrame,
+        offset: int | None = None
     ) -> None:
         """
         Create a new instance of the structure
@@ -379,7 +197,7 @@ class BaseSection:
 
     def __getitem__(
         self: Self,
-        itemkey: Union[int, slice, Sequence[int], EllipsisType]
+        itemkey: int | slice | Sequence[int] | EllipsisType
     ) -> Self:
         assert self.__indexing__, f"{self.section} is not indexing"
         if isinstance(itemkey, int):
@@ -396,8 +214,12 @@ class BaseSection:
         try:
             return super().__getattr__(__name)
         except AttributeError:
+            # Default error message is
+            # "'super' object has no attribute '__getattr__'.",
+            # which is not helpful.
             raise AttributeError(
-                f"'{self.__class__.__name__}' object has no attribute '{__name}'"
+                f"'{self.__class__.__name__}' object has no attribute "
+                f"'{__name}'"
             ) from None
 
     def __setattr__(self: Self, __name: str, __value: Any) -> None:
@@ -416,11 +238,14 @@ class BaseSection:
             return False
         return self._to_descriptor(None) == other._to_descriptor(None)
 
+    def __dataframe__(self: Self, **kwargs: Any) -> pd.DataFrame:
+        return self.to_dataframe()
+
     def _repr_html_(self: Self) -> str:
         return self.to_dataframe()._repr_html_()
 
     def add(
-        self: Self, obj: Union[Self, BaseStruct], copy: bool = True
+        self: Self, obj: Self | BaseStruct, copy: bool = True
     ) -> Self:
         """Add a new struct/section to the section"""
         assert self.__indexing__, f"Cannot add to {self.section}"
@@ -468,12 +293,15 @@ class BaseSection:
         return arry
 
     def _psetter(self: Self, name: str, value: np.ndarray):
+        dt, elem = self._metadata[name]
+        dt, _ = t.get_dtype_and_size(dt)
+        value = dt.type(value)
         if not self.__indexing__ and value.ndim == 0:
             value = value[None]
-        elem = self._metadata[name][1]
         if isinstance(elem, int):
             elem = (elem,)
         expected_shape = (int(self.entries), *elem)
+        # TODO: supprt single value
         if len(expected_shape) != value.ndim:
             if not (
                 len(expected_shape) > 1
@@ -488,7 +316,7 @@ class BaseSection:
 
     def _to_descriptor(
         self: Self,
-        itemkey : Union[slice, Sequence[int], None],
+        itemkey : slice | Sequence[int] | None,
         copy: bool = False
     ) -> DataDescriptor:
         kwg = dict()
@@ -507,7 +335,7 @@ class BaseSection:
             if op_camera not in itemkeys:
                 warnings.warn(
                     'The CAME opening index is not in the itemkey. '
-                    'This may cause freezing in the game.'
+                    'This may cause freezing in the game.',
                 )
             padding = getattr(self, special_name[1])
             kwg['additional'] = op_camera
@@ -544,14 +372,32 @@ class BaseSection:
         b += b''.join(rd.tobytes() for rd in desciptor.descriptor)
         return b
 
-    def to_dataframe(self: Self):
+    def to_dataframe(self: Self, hex_mode: bool = False, no_nan: bool = False):
         """
         Convert section data to a pandas DataFrame.
+
+        Args:
+            no_nan (bool, optional): If True, NaN values will be replaced with
+            hex_mode (bool, optional): If True, unsigned integer values will be
+            hexed. Defaults to False.
+            values that are more appropriate for the data type. Defaults to
 
         Returns:
             pandas.DataFrame: The DataFrame containing the data.
         """
-        return pandas_utils.to_dataframe(self.section, self)
+        return pandas_utils.to_dataframe(self, hex_mode, no_nan)
+
+    def _check_struct(self, index: int, data: 'BaseStruct'):
+        # check if nan values are present
+        for key, value in dataclasses.asdict(data).items():
+            if np.isnan(value).any():
+                raise ValueError(
+                    f"NaN values are not allowed. ({key}"
+                    f"of {self.section} #{index:X})"
+                )
+
+    def _check_section(self):
+        raise NotImplementedError
 
     def _init_from_dataframe(self, df: pd.DataFrame):
         pandas_utils.from_dataframe(df, self)
@@ -576,6 +422,7 @@ class BaseSection:
             setattr(self, "ignored", descriptor.additional)
 
         setattr(self, "_rdata", descriptor.descriptor)
+        _ = [self._check_struct(i, rd) for i, rd in enumerate(self._rdata)]
 
     def _init_from_parser(self: Self, parser: Parser) -> None:
         assert parser.is_read_contiuously, "Parser is not read continuously"
@@ -604,7 +451,7 @@ class BaseSection:
             v = list(v.ret_keys)
             v.remove(k)
             pass_ret_keys.extend(v)
-        for _ in range(entries):
+        for idx in range(entries):
             # read normally
             _init_kwargs = {}
             for key, value in self.__annotations__.items():
@@ -626,7 +473,18 @@ class BaseSection:
                     )
                 data = parser.read_number(dt, n)
                 _init_kwargs[key] = data
-            _rdata.append(struct_cls(**_init_kwargs))
+            try:
+                struct = struct_cls(**_init_kwargs)
+                self._check_struct(idx, struct)
+                _rdata.append(struct_cls(**_init_kwargs))
+            except TypeError as e:
+                if __debug__:
+                    raise e
+                msg = str(e) + (
+                    '\nFor developer: did you match all the names '
+                    'in the section and struct class?'
+                )
+                raise TypeError(msg) from e
 
         self._rdata = _rdata
 

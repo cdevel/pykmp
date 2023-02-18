@@ -1,4 +1,5 @@
-from typing import Any, ClassVar, Generic, NewType, TypeVar, Union
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, NewType, TypeVar,
+                    Union)
 
 import numpy as np
 import numpy.typing as npt
@@ -88,7 +89,10 @@ _argmap = {
 }
 
 
-def get_colname(key: str, dtype: Any):
+def get_colname(
+    key: str,
+    dtype: Any
+) -> str | list[str]:
     if isinstance(dtype, np.dtype) or dtype in _supportdtype:
         return key
     elif (
@@ -100,13 +104,14 @@ def get_colname(key: str, dtype: Any):
         _counts = _argmap[_elements]
         if isinstance(_counts, tuple):
             _, _counts = _counts
-        if _counts == 1 or _elements.__name__ == 'RGB':
+        if _counts == 1:
             return key
-        elif _elements.__name__ in ['XYZ', 'LR', 'XY', 'NXYZ']:
+        elif _elements.__name__ in ['XYZ', 'LR', 'XY', 'NXYZ', 'RGB']:
             name = _elements.__name__ if _elements.__name__ != 'NXYZ' else 'XYZ'
             return [key + '_' + k.lower() for k in name]
         return [key + '_' + str(i + 1) for i in range(_counts)]
 
+    raise TypeError(f"Unsupported dtype: {dtype}")
 
 def get_dtype_and_size(dtype: Any) -> tuple[np.dtype, int | tuple[None, int]]:
     """Get the dtype and elements size."""
