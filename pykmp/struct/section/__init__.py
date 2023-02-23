@@ -2,6 +2,7 @@ from pykmp.struct.section.area import AREA as AREA
 from pykmp.struct.section.came import CAME as CAME
 from pykmp.struct.section.ckpt_ckph import CKPH as CKPH
 from pykmp.struct.section.ckpt_ckph import CKPT as CKPT
+from pykmp.struct.section.ckpt_ckph import fix_pt_prev_next as fix_pt_prev_next
 from pykmp.struct.section.cnpt import CNPT as CNPT
 from pykmp.struct.section.enpt_enph import ENPH as ENPH
 from pykmp.struct.section.enpt_enph import ENPT as ENPT

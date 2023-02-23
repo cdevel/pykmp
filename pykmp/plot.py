@@ -7,6 +7,7 @@ from typing_extensions import Literal
 
 
 def to_graph(
+    length: np.ndarray,
     path: np.ndarray,
     view: bool = False,
     cleanup: bool = True,
@@ -21,6 +22,10 @@ def to_graph(
         cleanup(bool): clean up the generated files. Default is True.
         kwargs(dict): keyword arguments for graphviz.Digraph.
     """
+    assert length.shape[0] == path.shape[0], (
+        "length and path must have the same number of entries."
+        f"got {length.shape[0]} and {path.shape[0]}."
+    )
     _gX = lambda index: f'Group_{index:02X}'
 
     if 'format' not in kwargs:
@@ -47,7 +52,7 @@ def to_graph(
         for nxt in np.unique(_path[6:]):
             if nxt == 255:
                 break
-            dgraph.edge(_gX(i), _gX(nxt), label=' {}'.format(_path[1]))
+            dgraph.edge(_gX(i), _gX(nxt), label=' {}'.format(length[i]))
 
     dgraph.render(cleanup=cleanup, view=view)
 
@@ -69,4 +74,4 @@ class _GraphvizSupport:
             kwargs(dict): keyword arguments for graphviz.Digraph.
         """
         path = np.concatenate([self.prev, self.next], axis=1)
-        to_graph(path, view, cleanup, **kwargs)
+        to_graph(self.length, path, view, cleanup, **kwargs)

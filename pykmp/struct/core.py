@@ -15,6 +15,7 @@ import pykmp._typing as t
 from pykmp._io._parser import _BinaryParser as Parser
 from pykmp.struct import pandas_utils
 from pykmp.struct.descriptor import DataDescriptor, _ListMax255, _SpecialName
+from pykmp.utils import tobytes
 
 
 class HexPrinter:
@@ -82,14 +83,7 @@ class BaseStruct:
     def tobytes(self: Self) -> bytes:
         _bytes = []
         for v in dataclasses.asdict(self).values():
-            if v.dtype.kind in 'ui':
-                v = v.newbyteorder('big')
-            else:
-                if v.shape == ():
-                    v = np.array(float(v), dtype='>f4')
-                else:
-                    v = v.astype('>f4')
-            _bytes.append(v.tobytes())
+            _bytes.append(tobytes(v, v.dtype))
         return b''.join(_bytes)
 
     def check(self, raises: bool = True, fix_if_possible: bool = False):
@@ -194,6 +188,7 @@ class BaseSection:
                 "Input should be either a Parser or a DataDescriptor instance. "
                 f"Got {type(obj)}"
             )
+        self._check_section()
 
     def __getitem__(
         self: Self,
@@ -309,7 +304,8 @@ class BaseSection:
                 and value.ndim == len(expected_shape) - 1
             ):
                 raise ValueError(
-                    f"Shape mismatch. Expected {expected_shape}, got {value.shape}"
+                    f"Shape mismatch. Expected {expected_shape}, "
+                    f"got {value.shape}"
                 )
         for i, rd in enumerate(self._rdata):
             setattr(rd, name, value[i])
@@ -326,6 +322,8 @@ class BaseSection:
             itemkeys = list(range(*itemkey.indices(self.entries)))
             kwg['entries'] = np.uint16(len(itemkeys))
         else:
+            if isinstance(itemkey, np.ndarray):
+                itemkey = itemkey.tolist()
             itemkeys = list(itemkey or range(self.entries))
             kwg['entries'] = np.uint16(len(itemkeys))
 
@@ -361,15 +359,16 @@ class BaseSection:
 
     def tobytes(self: Self):
         """Convert section to bytes. Used for writing to file."""
-        desciptor = self._to_descriptor(None)
+        descriptor = self._to_descriptor(None)
         b = b''
-        b += desciptor.section.encode('utf-8')
-        b += desciptor.entries.newbyteorder('>').tobytes()
+        b += tobytes(descriptor.section)
+        #b += desciptor.section.encode('utf-8')
+        b += tobytes(int(descriptor.entries), np.uint16)
 
-        b += desciptor.additional.newbyteorder('>').tobytes()
-        if desciptor.padding is not None:
-            b += desciptor.padding.newbyteorder('>').tobytes()
-        b += b''.join(rd.tobytes() for rd in desciptor.descriptor)
+        b += tobytes(descriptor.additional)
+        if descriptor.padding is not None:
+            b += tobytes(descriptor.padding)
+        b += b''.join(rd.tobytes() for rd in descriptor.descriptor)
         return b
 
     def to_dataframe(self: Self, hex_mode: bool = False, no_nan: bool = False):
@@ -396,8 +395,8 @@ class BaseSection:
                     f"of {self.section} #{index:X})"
                 )
 
-    def _check_section(self):
-        raise NotImplementedError
+    def _check_section(self) -> None:
+        pass
 
     def _init_from_dataframe(self, df: pd.DataFrame):
         pandas_utils.from_dataframe(df, self)

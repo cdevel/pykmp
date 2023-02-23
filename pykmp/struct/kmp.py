@@ -19,6 +19,7 @@ from pykmp.ops import interpolate
 from pykmp.struct import section
 from pykmp.struct.descriptor import DataDescriptor, _ListMax255
 from pykmp.struct.pandas_utils import merge_pt_ph, split_pt_ph
+from pykmp.utils import tobytes
 
 _RKMD_STRUCT = (
     'KTPT', 'ENPT', 'ENPH', 'ITPT', 'ITPH', 'CKPT', 'CKPH', 'GOBJ', 'POTI',
@@ -26,7 +27,7 @@ _RKMD_STRUCT = (
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(eq=False)
 class KMP:
     """KMP file class"""
     header: str
@@ -48,6 +49,9 @@ class KMP:
     STGI: section.STGI
     # WIM0: section.WIM0
 
+    def __post_init__(self):
+        section.fix_pt_prev_next(self.CKPT, self.CKPH)
+
     def __repr__(self: Self):
         _repr = '<class \'pykmp.struct.kmp.KMP\'>\n'
         _repr += 'header: {}\n'.format(self.header)
@@ -59,6 +63,15 @@ class KMP:
                 _repr += ' (has LE-CODE mode)'
             _repr += '\n'
         return _repr[:-1]
+
+    def __eq__(self: Self, other: Self) -> bool:
+        cond = self.header == other.header
+        cond &= self.version_number == other.version_number
+        for name, _ in section.section_classes('kmp'):
+            if not __debug__:
+                print(name, getattr(self, name) == getattr(other, name))
+            cond &= getattr(self, name) == getattr(other, name)
+        return cond
 
     @property
     def le_mode(self: Self) -> bool:
@@ -85,15 +98,15 @@ class KMP:
         # header
         b = self.header.encode('utf-8')
         # byte length
-        b += int(byte_length).to_bytes(4, 'big', signed=False)
+        b += tobytes(int(byte_length), np.uint32)
         # total sections
-        b += int(len(section_size)).to_bytes(2, 'big', signed=False)
+        b += tobytes(len(section_size), np.uint16)
         # header length
-        b += int(header_length).to_bytes(2, 'big', signed=False)
+        b += tobytes(int(header_length), np.uint16)
         # version number
-        b += int(self.version_number).to_bytes(4, 'big', signed=False)
+        b += tobytes(int(self.version_number), np.uint32)
         # section offsets
-        b += np.uint32(section_offsets).byteswap().tobytes()
+        b += tobytes(section_offsets, np.uint32)
 
         with open(path, 'wb') as f:
             f.write(b)
@@ -210,7 +223,7 @@ class KMP:
         if not keywords:
             keywords = ('All',)
 
-    def to_excel(self, path: str, hex_mode: bool = False, **kwargs):
+    def to_excel(self, path: str, hex_mode: bool = True, **kwargs):
         if 'mode' in kwargs:
             raise ValueError('mode is not allowed.')
 
@@ -236,7 +249,6 @@ class KMP:
         with pd.ExcelWriter(path, mode='w', **kwargs) as writer:
             for name, df in data.items():
                 df.to_excel(writer, sheet_name=name, index=False)
-                print(df)
                 for i, col in enumerate(df.columns):
                     if len(col) <= 7:
                         continue

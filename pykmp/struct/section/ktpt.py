@@ -21,3 +21,9 @@ class KTPT(BaseSection, _AutoYSupport):
     playerIndex: Int16
     unknown: UInt16
 
+    def _check_struct(self, index: int, data: KTPTStruct):
+        if data.playerIndex > 11:
+            raise ValueError(
+                f"playerIndex of KTPT #{index:X} is out of range. "
+                f"expected x <= 11, got {data.playerIndex}."
+            )

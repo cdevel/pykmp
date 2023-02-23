@@ -9,6 +9,7 @@ from pykmp._io._parser import _BinaryParser as Parser
 from pykmp._typing import NXYZ, XYZ, Byte, Float, NScalar, UInt16
 from pykmp.struct.core import BaseSection, BaseStruct
 from pykmp.struct.section._utils import CustomFnSpec, section_add_attrs
+from pykmp.utils import tobytes
 
 
 def _parse_poti_points(parser: Parser, numpoints: int):
@@ -60,15 +61,14 @@ class POTIStruct(BaseStruct):
         return self.numpoints
 
     def tobytes(self: Self) -> bytes:
-        b = self.numpoints.newbyteorder('>').tobytes()
-        b += self.smooth.newbyteorder('>').tobytes()
-        b += self.forward_backward.newbyteorder('>').tobytes()
+        b = tobytes(self.numpoints, self.numpoints.dtype)
+        b += tobytes(self.smooth, self.smooth.dtype)
+        b += tobytes(self.forward_backward, self.forward_backward.dtype)
 
         for i in range(self.numpoints):
-            b += self.pos[i].byteswap().tobytes()
-            b += self.property1[i].newbyteorder('>').tobytes()
-            b += self.property2[i].newbyteorder('>').tobytes()
-
+            b += tobytes(self.pos[i])
+            b += tobytes(self.property1[i])
+            b += tobytes(self.property2[i])
         return b
 
     def __getitem__(self: Self, index: int | slice | Iterable[int]):
@@ -87,8 +87,10 @@ class POTIStruct(BaseStruct):
         index: int | slice | Iterable[int] | EllipsisType,
         value: PotiPoints
     ):
-        if (isinstance(index, Iterable)
-            and not all(isinstance(i, int) for i in index)):
+        if (
+            isinstance(index, Iterable)
+            and not all(isinstance(i, int) for i in index)
+        ):
             raise TypeError("Index must be int, slice, or iterable of ints")
         self.pos[index] = value.pos
         self.property1[index] = value.property1

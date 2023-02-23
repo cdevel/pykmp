@@ -1,4 +1,5 @@
 import dataclasses
+import warnings
 
 from pykmp._typing import XYZ, Byte, Float, UInt16
 from pykmp.ops.autoY import _AutoYSupport
@@ -44,3 +45,11 @@ class CAME(BaseSection, _AutoYSupport):
     viewbegpos: Float[XYZ]
     viewendpos: Float[XYZ]
     time: Float
+
+    def _check_struct(self, index: int, data: CAMEStruct):
+        if data.time < 0:
+            warnings.warn(
+                f"CAME #{index:X} has a negative time. "
+                "pykmp will set it to 0."
+            )
+            data.time = 0.

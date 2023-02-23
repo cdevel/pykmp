@@ -1,3 +1,4 @@
+import collections
 import dataclasses
 import warnings
 
@@ -8,6 +9,7 @@ from pykmp._typing import XYZ, Bit, Byte, Float, Settings, UInt16
 from pykmp.ops.autoY import _AutoYSupport
 from pykmp.struct.core import BaseSection, BaseStruct
 from pykmp.struct.section._utils import CustomFnSpec, section_add_attrs
+from pykmp.utils import tobytes
 
 
 def _parse_object_id(parser: Parser):
@@ -123,22 +125,24 @@ class GOBJStruct(BaseStruct):
     pf_2p: Bit
     pf_1p: Bit
 
-    def tobytes(self) -> bytes:
-        b = b''
-        data = dataclasses.asdict(self)
-        # definition object
-        originobjID = _to_object_id(
-            data['defobj_type'], data['lecode_show'],
-            data['preserved'], data['objectID']
+    @property
+    def robjectID(self) -> np.uint16:
+        """
+        Return the objectID (including defobj_type, lecode_show, preserved)
+        """
+        return _to_object_id(
+            self.defobj_type, self.lecode_show, self.preserved, self.objectID
         )
-        b += originobjID.newbyteorder('>').tobytes()
+
+    def tobytes(self) -> bytes:
+        # definition object
+        b = tobytes(self.robjectID)
 
         # presence flag
-        mode = np.unpackbits(data['mode'])[-4:] # 4 bits
-        parameters = np.unpackbits(data['parameters'])[-6:] # 6 bits
-        unused = np.unpackbits(data['unused'])[-3:] # 3 bits
-        pf = np.stack([data['pf_3p4p'], data['pf_2p'], data['pf_1p']])
-        pf = pf.astype(np.uint8)
+        mode = np.unpackbits(self.mode)[-4:] # 4 bits
+        parameters = np.unpackbits(self.parameters)[-6:] # 6 bits
+        unused = np.unpackbits(self.unused)[-3:] # 3 bits
+        pf = np.stack([self.pf_3p4p, self.pf_2p, self.pf_1p]).astype(np.uint8)
 
         p16 = np.power(2, np.arange(16))[::-1]
         presence_flag = np.hstack([mode, parameters, unused, pf])
@@ -147,18 +151,17 @@ class GOBJStruct(BaseStruct):
         skips = (
             'defobj_type', 'lecode_show',
             'preserved', 'objectID',
-            'mode', 'parameters', 'unused', 'pf_3p4p', 'pf_2p', 'pf_1p'
+            'mode', 'parameters', 'unused',
+            'pf_3p4p', 'pf_2p', 'pf_1p'
         )
 
-        for k, v in data.items():
+        for k, v in dataclasses.asdict(self).items():
             if k in skips:
                 continue
-            b += v.newbyteorder('>').tobytes()
-        b += presence_flag.newbyteorder('>').tobytes()
+            #val = correct_order(v)
+            b += tobytes(v, v.dtype)
+        b += tobytes(presence_flag)
         return b
-
-    def check(self, raises: bool = True, fix_if_possible: bool = False):
-        return super().check(raises, fix_if_possible)
 
 
 @section_add_attrs(GOBJStruct, custom_fn=GOBJ_SPEC)
@@ -184,21 +187,58 @@ class GOBJ(BaseSection, _AutoYSupport):
     def le_mode(self) -> bool:
         return np.any(self.mode > 0).item()
 
+    def _check_section(self) -> None:
+        # find referenceID > 0x2000
+        pos = np.where(self.referenceID > 0x2000)[0]
+        # check duplicate / missing
+        if len(pos) > 0:
+            ids = self.referenceID[pos]
+
+            # check duplicate referenceID
+            unique, counts = np.unique(pos, return_counts=True)
+            if np.any(counts > 1):
+                dup = unique[counts > 1]
+                dupIDs = self.referenceID[dup]
+                hexs = ', '.join([f'GOBJ #{i:X}' for i in dup])
+                msg = (
+                    f"Duplicate referenceID ({unique[counts > 1]:X}) in GOBJ section."
+                )
+                warnings.warn(msg)
+
+            *robjids, = map(lambda x: x.robjectID, self._rdata)
+            for i, rid in enumerate(ids):
+                if rid not in robjids:
+                    msg = (
+                        f"Missing objectID ({rid:X}) in GOBJ section"
+                        f" (by referenceID of GOBJ #{pos[i]:X})."
+                    )
+                    warnings.warn(msg)
+                # check duplicate
+                dups = np.where(rid == ids)[0]
+                if len(dups) > 1:
+                    msg = (
+                        f"Duplicate objectID ({rid:X}) in GOBJ section"
+                        f" (by referenceID of GOBJ #{pos[dups[0]]:X} and"
+                    )
+                    warnings.warn(msg)
+
+
     def _check_struct(self, index: int, data: GOBJStruct):
         super()._check_struct(index, data)
-        def _raise_if_over(value, max_value, name):
+        def _raise_if_over(name, max_value):
+            value = getattr(data, name)
             if value > max_value:
                 raise ValueError(
                     f"The {name} of GOBJ #{index:X} is too large. "
                     f"The maximum value is 0x{max_value:X}, but the "
                     f"value is 0x{value:X}."
                 )
-        _raise_if_over(data.defobj_type, 0x07, 'defobj_type')
-        _raise_if_over(data.preserved, 0x03, 'preserved')
-        _raise_if_over(data.objectID, 0x3FF, 'objectID')
-        _raise_if_over(data.parameters, 0x3F, 'parameters')
-        _raise_if_over(data.mode, 0x0F, 'mode')
-        _raise_if_over(data.unused, 0x07, 'unused')
+        _raise_if_over('defobj_type', 0x07)
+        _raise_if_over('preserved', 0x03)
+        _raise_if_over('objectID', 0x3FF)
+        _raise_if_over('parameters', 0x3F)
+        _raise_if_over('mode', 0x0F)
+        _raise_if_over('unused', 0x07)
 
         if data.mode == 0 and (
             data.defobj_type != 0 or
@@ -214,6 +254,7 @@ class GOBJ(BaseSection, _AutoYSupport):
                 f"The object (ID: 0x{objID:04X}) of GOBJ #{index:X} is not show "
                 "in the game. To show it, set mode to 1 or higher."
             )
+        # LE-MODE
         elif data.mode == 1:
             # defobj_type supports 0, 1, 2, 3
             if data.defobj_type not in [0, 1, 2, 3]:
@@ -242,7 +283,6 @@ class GOBJ(BaseSection, _AutoYSupport):
                     )
                     data.routeID = np.uint16(0xFFFF)
             # predefined condition
-            # XXX: 0x2000 -> ?
             if (
                 (0 < data.referenceID <= 0x1FFF)
                 and (

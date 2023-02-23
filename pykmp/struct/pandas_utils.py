@@ -1,3 +1,4 @@
+import re
 import warnings
 from collections import defaultdict
 from itertools import groupby
@@ -11,6 +12,12 @@ from pykmp.struct.descriptor import DataDescriptor, _ListMax255, _SpecialName
 
 Section = TypeVar('Section')
 Struct = TypeVar('Struct')
+# hex pattern
+_hex_pattern = re.compile(r'0x[0-9a-fA-F]+')
+# hex pattern, but not including 0x
+_hex_pattern2 = re.compile(r'[0-9a-fA-F]+')
+# floating
+_float_pattern = re.compile(r'\s+([-+]?\d+\.?\d*|\.\d+[eE][-+]?\d+?)')
 
 def merge_pt_ph(pt: pd.DataFrame, ph: pd.DataFrame) -> pd.DataFrame:
     cols = list(pt.columns) + list(ph.columns)
@@ -124,9 +131,8 @@ def _assert_size_mismatch(pred, actual):
     )
 
 
-def _fix_dataframe(
-    df: pd.DataFrame, section: Section
-):
+def _fix_dataframe(df: pd.DataFrame, section: Section):
+    """Fix the dataframe if it is from an old version (0.1)"""
     if df.columns[0] == "Unnamed: 0":
         # start to fix
         renamed_cols = []
@@ -220,6 +226,32 @@ def _fix_dataframe(
     return df
 
 
+def _add_0x(value):
+    if isinstance(value, str):
+        if value[:2] != '0x':
+            value = '0x' + value
+        return value
+    # pd.Series
+    return value.map(lambda x: '0x' + str(x))
+
+
+def _convert_if_hex(value, dtype_hint: np.dtype):
+    if not dtype_hint.kind == 'u':
+        return value
+
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return int(_add_0x(value), 0)
+    elif isinstance(value, pd.Series):
+        try:
+            return value.map(int)
+        except ValueError:
+            return value.map(lambda x: int(_add_0x(x), 0))
+    return value
+
+
 def from_dataframe(
     df: pd.DataFrame,
     section: Section,
@@ -241,9 +273,10 @@ def from_dataframe(
     special_name = _SpecialName.get(name, 'ignored')
     iloc_index = list(range(init_kwgs['entries']))
 
+    # analyze section header
     if name == 'CAME':
         try:
-            op_camera = int(df.query('op_camera > 0')['op_camera'])
+            op_camera = int(df.query('op_camera > 0')['op_camera'].index[0])
         except (ValueError, TypeError) as e:
             raise ValueError(
                 'Cannot find the opening camera. See the error below.') from e
@@ -277,6 +310,7 @@ def from_dataframe(
         init_kwgs['padding'] = None
         init_kwgs['special_name'] = None
 
+    # setup attibute names
     attr_names = []
     colindex = 0
     for k, v in groupby(df.columns, key=_gby_key):
@@ -293,6 +327,7 @@ def from_dataframe(
     _rdata = _ListMax255()
     annotations = section.__annotations__
 
+    # create rdata
     for i in range(init_kwgs['entries']):
         _init_kwgs = {}
         if section.__rname__ == 'POTI':
@@ -308,7 +343,8 @@ def from_dataframe(
                 data = loc_df.iloc[:, cols]
             else:
                 data = loc_df.iloc[cols]
-            data = dt.type(data)
+            # convert hex string to int(if)
+            data = dt.type(_convert_if_hex(data, dt))
             if isinstance(size, tuple):
                 data = data.reshape(-1, size[1])
             _init_kwgs[attr_name] = data
